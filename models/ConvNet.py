@@ -8,7 +8,7 @@ KERNEL_SIZE = 3
 NUM_CONV_LAYERS = 4
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-class ConvModel:
+class ConvModel(nn.Module):
     meta_parameters = {}
     def __init__(self, num_outputs):
         in_channels = NUM_INPUT_CHANNELS

@@ -13,7 +13,8 @@ from torchmeta.transforms import Categorical, ClassSplitter
 from torchmeta.utils.data import BatchMetaDataLoader
 from torchvision.transforms import transforms
 from util import score
-from model import ConvModel
+from models.ConvNet import ConvModel
+# from models.ResNet import ResNet
 
 NUM_INPUT_CHANNELS = 1
 NUM_HIDDEN_CHANNELS = 64
@@ -148,10 +149,4 @@ class MAML:
             if i == NUM_TEST_TASKS:
                 break
         mean = np.mean(accuracies)
-        std = np.std(accuracies)
-        mean_95_confidence_interval = 1.96 * std / np.sqrt(NUM_TEST_TASKS)
-        print(
-            f'Accuracy over {NUM_TEST_TASKS} test tasks: '
-            f'mean {mean:.3f}, '
-            f'95% confidence interval {mean_95_confidence_interval:.3f}'
-        )
+        print("Acc:", mean)
