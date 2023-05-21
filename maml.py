@@ -12,38 +12,19 @@ from torchmeta.datasets import CIFARFS, Omniglot
 from torchmeta.transforms import Categorical, ClassSplitter
 from torchmeta.utils.data import BatchMetaDataLoader
 from torchvision.transforms import transforms
+from util import score
+from model import ConvModel
 
 NUM_INPUT_CHANNELS = 1
 NUM_HIDDEN_CHANNELS = 64
 KERNEL_SIZE = 3
 NUM_CONV_LAYERS = 4
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-SUMMARY_INTERVAL = 10
-SAVE_INTERVAL = 100
 LOG_INTERVAL = 10
 VAL_INTERVAL = LOG_INTERVAL * 5
 NUM_TEST_TASKS = 600
 
-def score(logits, labels):
-    """Returns the mean accuracy of a model's predictions on a set of examples.
-
-    Args:
-        logits (torch.Tensor): model predicted logits
-            shape (examples, classes)
-        labels (torch.Tensor): classification labels from 0 to num_classes - 1
-            shape (examples,)
-    """
-
-    assert logits.dim() == 2
-    assert labels.dim() == 1
-    assert logits.shape[0] == labels.shape[0]
-    y = torch.argmax(logits, dim=-1) == labels
-    y = y.type(torch.float)
-    return torch.mean(y).item()
-
 class MAML:
-    """Trains and assesses a MAML."""
-
     def __init__(
             self,
             num_outputs,
@@ -54,48 +35,8 @@ class MAML:
             train_max_samples,
             val_max_samples
     ):
-        meta_parameters = {}
-
-        # construct feature extractor
-        in_channels = NUM_INPUT_CHANNELS
-        for i in range(NUM_CONV_LAYERS):
-            meta_parameters[f'conv{i}'] = nn.init.xavier_uniform_(
-                torch.empty(
-                    NUM_HIDDEN_CHANNELS,
-                    in_channels,
-                    KERNEL_SIZE,
-                    KERNEL_SIZE,
-                    requires_grad=True,
-                    device=DEVICE
-                )
-            )
-            meta_parameters[f'b{i}'] = nn.init.zeros_(
-                torch.empty(
-                    NUM_HIDDEN_CHANNELS,
-                    requires_grad=True,
-                    device=DEVICE
-                )
-            )
-            in_channels = NUM_HIDDEN_CHANNELS
-
-        # construct linear head layer
-        meta_parameters[f'w{NUM_CONV_LAYERS}'] = nn.init.xavier_uniform_(
-            torch.empty(
-                num_outputs,
-                NUM_HIDDEN_CHANNELS,
-                requires_grad=True,
-                device=DEVICE
-            )
-        )
-        meta_parameters[f'b{NUM_CONV_LAYERS}'] = nn.init.zeros_(
-            torch.empty(
-                num_outputs,
-                requires_grad=True,
-                device=DEVICE
-            )
-        )
-
-        self._meta_parameters = meta_parameters
+        self.model = ConvModel(num_outputs)
+        self._meta_parameters = self.model.meta_parameters
         self._num_inner_steps = num_inner_steps
         self._inner_lrs = {
             k: torch.tensor(inner_lr, requires_grad=learn_inner_lrs)
@@ -111,26 +52,6 @@ class MAML:
 
         self.train_max_samples = train_max_samples
         self.val_max_samples = val_max_samples
-        self._start_train_step = 0
-
-    def _forward(self, images, parameters):
-        x = images
-        for i in range(NUM_CONV_LAYERS):
-            x = F.conv2d(
-                input=x,
-                weight=parameters[f'conv{i}'],
-                bias=parameters[f'b{i}'],
-                stride=1,
-                padding='same'
-            )
-            x = F.batch_norm(x, None, None, training=True)
-            x = F.relu(x)
-        x = torch.mean(x, dim=[2, 3])
-        return F.linear(
-            input=x,
-            weight=parameters[f'w{NUM_CONV_LAYERS}'],
-            bias=parameters[f'b{NUM_CONV_LAYERS}']
-        )
 
     def _inner_loop(self, images, labels, train):
         accuracies = []
@@ -139,20 +60,16 @@ class MAML:
             for k, v in self._meta_parameters.items()
         }
         for _ in range(self._num_inner_steps):
-            # Forward propagation to obtain y_support
-            y_support = self._forward(images, parameters)
-            # Compute classification losses
+            y_support = self.model.forward(images, parameters)
             inner_loss = F.cross_entropy(y_support, labels)
 
-            # Compute accuracies
             accuracies.append(score(y_support, labels))
-
             grads_list = autograd.grad(inner_loss, parameters.values(), create_graph=train)
 
             for (i, n) in enumerate(parameters.keys()):
                 parameters[n] = parameters[n] - self._inner_lrs[n] * grads_list[i]
 
-        y_support = self._forward(images, parameters)
+        y_support = self.model.forward(images, parameters)
         accuracies.append(score(y_support, labels))
 
         return parameters, accuracies
@@ -161,19 +78,18 @@ class MAML:
         outer_loss_batch = []
         accuracies_support_batch = []
         accuracy_query_batch = []
+
         batch_images_support, batch_labels_support = task_batch['train']
         batch_images_query, batch_labels_query = task_batch['test']
         for task in range(len(task_batch['train'][0])):
             images_support, labels_support = batch_images_support[task], batch_labels_support[task]
             images_query, labels_query = batch_images_query[task], batch_labels_query[task]
 
-            images_support = images_support.to(DEVICE)
-            labels_support = labels_support.to(DEVICE)
-            images_query = images_query.to(DEVICE)
-            labels_query = labels_query.to(DEVICE)
+            images_support, labels_support = images_support.to(DEVICE), labels_support.to(DEVICE)
+            images_query, labels_query = images_query.to(DEVICE), labels_query.to(DEVICE)
 
             adapted_parameters, accuracy_support = self._inner_loop(images_support, labels_support, train=train)
-            y_query = self._forward(images_query, adapted_parameters)
+            y_query = self.model.forward(images_query, adapted_parameters)
 
             # Compute classification losses
             outer_loss = F.cross_entropy(y_query, labels_query)
@@ -182,16 +98,14 @@ class MAML:
             accuracies_support_batch.append(accuracy_support)
             accuracy_query = score(y_query, labels_query)
             accuracy_query_batch.append(accuracy_query)
+
         outer_loss = torch.mean(torch.stack(outer_loss_batch))
-        accuracies_support = np.mean(
-            accuracies_support_batch,
-            axis=0
-        )
+        accuracies_support = np.mean(accuracies_support_batch,axis=0)
         accuracy_query = np.mean(accuracy_query_batch)
         return outer_loss, accuracies_support, accuracy_query
 
     def train(self, dataloader_train, dataloader_val):
-        for i_step, task_batch in enumerate(dataloader_train, start=self._start_train_step):
+        for i_step, task_batch in enumerate(dataloader_train):
             self._optimizer.zero_grad()
             outer_loss, accuracies_support, accuracy_query = (
                 self._outer_step(task_batch, train=True)
@@ -200,7 +114,6 @@ class MAML:
             self._optimizer.step()
 
             if i_step % VAL_INTERVAL == 0:
-                print("Validating")
                 losses = []
                 accuracies_pre_adapt_support = []
                 accuracies_post_adapt_support = []
@@ -218,15 +131,9 @@ class MAML:
                         break
                     
                 loss = np.mean(losses)
-                accuracy_pre_adapt_support = np.mean(
-                    accuracies_pre_adapt_support
-                )
-                accuracy_post_adapt_support = np.mean(
-                    accuracies_post_adapt_support
-                )
-                accuracy_post_adapt_query = np.mean(
-                    accuracies_post_adapt_query
-                )
+                accuracy_pre_adapt_support = np.mean(accuracies_pre_adapt_support)
+                accuracy_post_adapt_support = np.mean(accuracies_post_adapt_support)
+                accuracy_post_adapt_query = np.mean(accuracies_post_adapt_query)
 
                 print(f"Loss: {loss}, acc_pre_adp_sup: {accuracy_pre_adapt_support}, acc_post_adp_sup: {accuracy_post_adapt_support}, acc_post_adp_query: {accuracy_post_adapt_query}") 
             if i_step == self.train_max_samples:
@@ -235,9 +142,11 @@ class MAML:
 
     def test(self, dataloader_test):
         accuracies = []
-        for task_batch in dataloader_test:
+        for i, task_batch in enumerate(dataloader_test):
             _, _, accuracy_query = self._outer_step(task_batch, train=False)
             accuracies.append(accuracy_query)
+            if i == NUM_TEST_TASKS:
+                break
         mean = np.mean(accuracies)
         std = np.std(accuracies)
         mean_95_confidence_interval = 1.96 * std / np.sqrt(NUM_TEST_TASKS)
