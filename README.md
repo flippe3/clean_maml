@@ -1,5 +1,3 @@
 # Clean MAML
 
-```
-pip install -r requirements.txt
-```
+Currently this repo tries to use both torchmeta and torch.func features which shouldn't be compatible with eachother...
