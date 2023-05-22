@@ -29,9 +29,15 @@ if __name__ == '__main__':
     test = False
     n_way = 5 
     shots = 1
-    batch_size = 64
+    batch_size = 32
     epochs = 2
     num_adaption_steps = 1
+    seed = 42
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
 
     transform = transforms.Compose([
         transforms.Resize((28,28)),

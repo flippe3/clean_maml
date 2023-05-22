@@ -40,9 +40,6 @@ class MAML:
             grads = grad(compute_loss)(new_params, buffers, x_spt, y_spt)
             new_params = {k: new_params[k] - g * 1e-1 for k, g, in grads.items()}
 
-        # The final set of adapted parameters will induce some
-        # final loss and accuracy on the query dataset.
-        # These will be used to update the model's meta-parameters.
         qry_logits = functional_call(net, (new_params, buffers), x_qry)
         qry_loss = F.cross_entropy(qry_logits, y_qry)
         qry_acc = (qry_logits.argmax(dim=1) == y_qry).sum() / querysz
@@ -59,7 +56,7 @@ class MAML:
         
         for batch_idx in range(max_batches):
             start_time = time.time()
-            # Sample a batch of support and query images and labels.
+
             batch = next(db)
             x_spt, y_spt = batch['train']
             x_qry, y_qry = batch['test']
@@ -88,14 +85,9 @@ class MAML:
                 wandb.log({'loss': qry_losses, 'acc': qry_accs, 'epoch': i})
 
     def test(self, db, net, device, epoch, num_adaption_steps):
-        # Crucially in our testing procedure here, we do *not* fine-tune
-        # the model during testing for simplicity.
-        # Most research papers using MAML for this task do an extra
-        # stage of fine-tuning here that should be added if you are
-        # adapting this code for research.
         params = dict(net.named_parameters())
         buffers = dict(net.named_buffers())
-        max_batches = 40
+        max_batches = 10
         db = iter(db) 
 
         qry_losses = []
@@ -113,19 +105,25 @@ class MAML:
             # TODO: Maybe pull this out into a separate module so it
             # doesn't have to be duplicated between `train` and `test`?
 
-            for i in range(task_num):
-                new_params = params
-                for _ in range(num_adaption_steps):
-                    spt_logits = functional_call(net, (new_params, buffers), x_spt[i])
-                    spt_loss = F.cross_entropy(spt_logits, y_spt[i])
-                    grads = torch.autograd.grad(spt_loss, new_params.values())
-                    new_params = {k: new_params[k] - g * 1e-1 for k, g, in zip(new_params, grads)}
+            compute_loss_for_task = functools.partial(self.loss_for_task, net, num_adaption_steps)
+            qry_loss, qry_acc = vmap(compute_loss_for_task)(x_spt, y_spt, x_qry, y_qry)
 
-                # The query loss and acc induced by these parameters.
-                qry_logits = functional_call(net, (new_params, buffers), x_qry[i]).detach()
-                qry_loss = F.cross_entropy(qry_logits, y_qry[i], reduction='none')
-                qry_losses.append(qry_loss.detach())
-                qry_accs.append((qry_logits.argmax(dim=1) == y_qry[i]).detach())
+            qry_losses.append(qry_loss)
+            qry_accs.append(qry_acc)
+
+            # for i in range(task_num):
+            #     new_params = params
+            #     for _ in range(num_adaption_steps):
+            #         spt_logits = functional_call(net, (new_params, buffers), x_spt[i])
+            #         spt_loss = F.cross_entropy(spt_logits, y_spt[i])
+            #         grads = torch.autograd.grad(spt_loss, new_params.values())
+            #         new_params = {k: new_params[k] - g * 1e-1 for k, g, in zip(new_params, grads)}
+
+            #     # The query loss and acc induced by these parameters.
+            #     qry_logits = functional_call(net, (new_params, buffers), x_qry[i]).detach()
+            #     qry_loss = F.cross_entropy(qry_logits, y_qry[i], reduction='none')
+            #     qry_losses.append(qry_loss.detach())
+            #     qry_accs.append((qry_logits.argmax(dim=1) == y_qry[i]).detach())
 
         qry_losses = torch.cat(qry_losses).mean().item()
         qry_accs = 100. * torch.cat(qry_accs).float().mean().item()
