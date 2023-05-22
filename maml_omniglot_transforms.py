@@ -45,11 +45,11 @@ def loss_for_task(net, n_inner_iter, x_spt, y_spt, x_qry, y_qry):
     return qry_loss, qry_acc
 
 
-def train(db, net, device, meta_opt, epoch):
+def train(db, net, device, meta_opt, epoch, num_adaption_steps):
     params = dict(net.named_parameters())
     buffers = dict(net.named_buffers())
     n_train_iter = db.x_train.shape[0] // db.batchsz
-
+    
     for batch_idx in range(n_train_iter):
         start_time = time.time()
         # Sample a batch of support and query images and labels.
@@ -57,12 +57,11 @@ def train(db, net, device, meta_opt, epoch):
 
         task_num, setsz, c_, h, w = x_spt.size()
 
-        n_inner_iter = 1
         meta_opt.zero_grad()
 
         # In parallel, trains one model per task. There is a support (x, y)
         # for each task and a query (x, y) for each task.
-        compute_loss_for_task = functools.partial(loss_for_task, net, n_inner_iter)
+        compute_loss_for_task = functools.partial(loss_for_task, net, num_adaption_steps)
         qry_losses, qry_accs = vmap(compute_loss_for_task)(x_spt, y_spt, x_qry, y_qry)
 
         # Compute the maml loss by summing together the returned losses.
@@ -74,11 +73,9 @@ def train(db, net, device, meta_opt, epoch):
         i = epoch + float(batch_idx) / n_train_iter
         iter_time = time.time() - start_time
         if batch_idx % 4 == 0:
-            print(
-                f'[Epoch {i:.2f}] Train Loss: {qry_losses:.2f} | Acc: {qry_accs:.2f} | Time: {iter_time:.2f}'
-            )
+            print(f'[Epoch {i:.2f}] Train Loss: {qry_losses:.2f} | Acc: {qry_accs:.2f} | Time: {iter_time:.2f}')
 
-def test(db, net, device, epoch):
+def test(db, net, device, epoch, num_adaption_steps):
     # Crucially in our testing procedure here, we do *not* fine-tune
     # the model during testing for simplicity.
     # Most research papers using MAML for this task do an extra
@@ -97,11 +94,10 @@ def test(db, net, device, epoch):
 
         # TODO: Maybe pull this out into a separate module so it
         # doesn't have to be duplicated between `train` and `test`?
-        n_inner_iter = 1
 
         for i in range(task_num):
             new_params = params
-            for _ in range(n_inner_iter):
+            for _ in range(num_adaption_steps):
                 spt_logits = functional_call(net, (new_params, buffers), x_spt[i])
                 spt_loss = F.cross_entropy(spt_logits, y_spt[i])
                 grads = torch.autograd.grad(spt_loss, new_params.values())
@@ -122,8 +118,9 @@ def test(db, net, device, epoch):
 
 if __name__ == '__main__':
     epochs = 15
-    batch_size = 32 
+    batch_size = 16
     n_way, k_spt, k_qry = 5, 5, 15
+    num_adaption_steps = 1
     seed = 42
 
     torch.manual_seed(seed)
@@ -144,7 +141,7 @@ if __name__ == '__main__':
         device=device,
     )
 
-    net = torchvision.models.resnet18(norm_layer=partial(nn.BatchNorm2d, track_running_stats=False))
+    net = torchvision.models.resnet101(norm_layer=partial(nn.BatchNorm2d, track_running_stats=False))
     net.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False) # Since omniglot is grayscale
     net.fc = nn.Linear(net.fc.in_features, n_way)
     net.to(device)
@@ -153,5 +150,5 @@ if __name__ == '__main__':
     meta_opt = optim.Adam(net.parameters(), lr=1e-3)
 
     for epoch in range(epochs):
-        train(db, net, device, meta_opt, epoch)
-        test(db, net, device, epoch)
+        train(db, net, device, meta_opt, epoch, num_adaption_steps)
+        test(db, net, device, epoch, num_adaption_steps)
