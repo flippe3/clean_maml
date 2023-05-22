@@ -1,32 +1,3 @@
-#!/usr/bin/env python3
-#
-# Copyright (c) Facebook, Inc. and its affiliates.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""
-This example shows how to use higher to do Model Agnostic Meta Learning (MAML)
-for few-shot Omniglot classification.
-For more details see the original MAML paper:
-https://arxiv.org/abs/1703.03400
-
-This code has been modified from Jackie Loong's PyTorch MAML implementation:
-https://github.com/dragen1860/MAML-Pytorch/blob/master/omniglot_train.py
-
-Our MAML++ fork and experiments are available at:
-https://github.com/bamos/HowToTrainYourMAMLPytorch
-"""
-
 from support.omniglot_loaders import OmniglotNShot
 from torch.func import vmap, grad, functional_call
 import torch.optim as optim
@@ -38,85 +9,14 @@ import matplotlib.pyplot as plt
 import argparse
 import time
 import functools
+import torchvision
+from functools import partial
 
 import pandas as pd
 import numpy as np
 import matplotlib as mpl
 mpl.use('Agg')
 plt.style.use('bmh')
-
-
-def main():
-    argparser = argparse.ArgumentParser()
-    argparser.add_argument('--n-way', '--n_way', type=int, help='n way', default=5)
-    argparser.add_argument(
-        '--k-spt', '--k_spt', type=int, help='k shot for support set', default=5)
-    argparser.add_argument(
-        '--k-qry', '--k_qry', type=int, help='k shot for query set', default=15)
-    argparser.add_argument(
-        '--device', type=str, help='device', default='cuda')
-    argparser.add_argument(
-        '--task-num', '--task_num',
-        type=int,
-        help='meta batch size, namely task num',
-        default=32)
-    argparser.add_argument('--seed', type=int, help='random seed', default=1)
-    args = argparser.parse_args()
-
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
-    np.random.seed(args.seed)
-
-    # Set up the Omniglot loader.
-    device = args.device
-    db = OmniglotNShot(
-        '/tmp/omniglot-data',
-        batchsz=args.task_num,
-        n_way=args.n_way,
-        k_shot=args.k_spt,
-        k_query=args.k_qry,
-        imgsz=28,
-        device=device,
-    )
-
-    # Create a vanilla PyTorch neural network.
-    # inplace_relu = True
-    # net = nn.Sequential(
-    #     nn.Conv2d(1, 64, 3),
-    #     nn.BatchNorm2d(64, affine=True, track_running_stats=False),
-    #     nn.ReLU(inplace=inplace_relu),
-    #     nn.MaxPool2d(2, 2),
-    #     nn.Conv2d(64, 64, 3),
-    #     nn.BatchNorm2d(64, affine=True, track_running_stats=False),
-    #     nn.ReLU(inplace=inplace_relu),
-    #     nn.MaxPool2d(2, 2),
-    #     nn.Conv2d(64, 64, 3),
-    #     nn.BatchNorm2d(64, affine=True, track_running_stats=False),
-    #     nn.ReLU(inplace=inplace_relu),
-    #     nn.MaxPool2d(2, 2),
-    #     nn.Flatten(),
-    #     nn.Linear(64, args.n_way)).to(device)
-
-    import torchvision
-    from functools import partial
-    net = torchvision.models.resnet18(norm_layer=partial(nn.BatchNorm2d, track_running_stats=False))
-    net.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-    net.fc = nn.Linear(net.fc.in_features, args.n_way)
-
-    net.to(device)
-    net.train()
-
-    # We will use Adam to (meta-)optimize the initial parameters
-    # to be adapted.
-    meta_opt = optim.Adam(net.parameters(), lr=1e-3)
-
-    log = []
-    for epoch in range(15):
-        train(db, net, device, meta_opt, epoch, log)
-        test(db, net, device, epoch, log)
-        plot(log)
-
 
 # Trains a model for n_inner_iter using the support and returns a loss
 # using the query.
@@ -140,13 +40,12 @@ def loss_for_task(net, n_inner_iter, x_spt, y_spt, x_qry, y_qry):
     # These will be used to update the model's meta-parameters.
     qry_logits = functional_call(net, (new_params, buffers), x_qry)
     qry_loss = F.cross_entropy(qry_logits, y_qry)
-    qry_acc = (qry_logits.argmax(
-        dim=1) == y_qry).sum() / querysz
+    qry_acc = (qry_logits.argmax(dim=1) == y_qry).sum() / querysz
 
     return qry_loss, qry_acc
 
 
-def train(db, net, device, meta_opt, epoch, log):
+def train(db, net, device, meta_opt, epoch):
     params = dict(net.named_parameters())
     buffers = dict(net.named_buffers())
     n_train_iter = db.x_train.shape[0] // db.batchsz
@@ -179,16 +78,7 @@ def train(db, net, device, meta_opt, epoch, log):
                 f'[Epoch {i:.2f}] Train Loss: {qry_losses:.2f} | Acc: {qry_accs:.2f} | Time: {iter_time:.2f}'
             )
 
-        log.append({
-            'epoch': i,
-            'loss': qry_losses,
-            'acc': qry_accs,
-            'mode': 'train',
-            'time': time.time(),
-        })
-
-
-def test(db, net, device, epoch, log):
+def test(db, net, device, epoch):
     # Crucially in our testing procedure here, we do *not* fine-tune
     # the model during testing for simplicity.
     # Most research papers using MAML for this task do an extra
@@ -227,38 +117,41 @@ def test(db, net, device, epoch, log):
 
     qry_losses = torch.cat(qry_losses).mean().item()
     qry_accs = 100. * torch.cat(qry_accs).float().mean().item()
-    print(
-        f'[Epoch {epoch+1:.2f}] Test Loss: {qry_losses:.2f} | Acc: {qry_accs:.2f}'
-    )
-    log.append({
-        'epoch': epoch + 1,
-        'loss': qry_losses,
-        'acc': qry_accs,
-        'mode': 'test',
-        'time': time.time(),
-    })
-
-
-def plot(log):
-    # Generally you should pull your plotting code out of your training
-    # script but we are doing it here for brevity.
-    df = pd.DataFrame(log)
-
-    fig, ax = plt.subplots(figsize=(6, 4))
-    train_df = df[df['mode'] == 'train']
-    test_df = df[df['mode'] == 'test']
-    ax.plot(train_df['epoch'], train_df['acc'], label='Train')
-    ax.plot(test_df['epoch'], test_df['acc'], label='Test')
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Accuracy')
-    ax.set_ylim(70, 100)
-    fig.legend(ncol=2, loc='lower right')
-    fig.tight_layout()
-    fname = 'maml-accs.png'
-    print(f'--- Plotting accuracy to {fname}')
-    fig.savefig(fname)
-    plt.close(fig)
+    print(f'[Epoch {epoch+1:.2f}] Test Loss: {qry_losses:.2f} | Acc: {qry_accs:.2f}')
 
 
 if __name__ == '__main__':
-    main()
+    epochs = 15
+    batch_size = 32 
+    n_way, k_spt, k_qry = 5, 5, 15
+    seed = 42
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+
+    # Set up the Omniglot loader.
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    db = OmniglotNShot(
+        '/tmp/omniglot-data',
+        batchsz=batch_size,
+        n_way=n_way,
+        k_shot=k_spt,
+        k_query=k_qry,
+        imgsz=28,
+        device=device,
+    )
+
+    net = torchvision.models.resnet18(norm_layer=partial(nn.BatchNorm2d, track_running_stats=False))
+    net.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False) # Since omniglot is grayscale
+    net.fc = nn.Linear(net.fc.in_features, n_way)
+    net.to(device)
+    net.train()
+
+    meta_opt = optim.Adam(net.parameters(), lr=1e-3)
+
+    for epoch in range(epochs):
+        train(db, net, device, meta_opt, epoch)
+        test(db, net, device, epoch)
