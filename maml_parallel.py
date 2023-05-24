@@ -81,7 +81,7 @@ class MAML:
             iter_time = time.time() - start_time
             if batch_idx % 4 == 0:
                 print(f'[Epoch {i:.2f}] Train Loss: {qry_losses:.2f} | Acc: {qry_accs:.2f} | Time: {iter_time:.2f}')
-                wandb.log({'loss': qry_losses, 'acc': qry_accs, 'epoch': i})
+                wandb.log({'train_loss': qry_losses, 'train_acc': qry_accs})
 
     def test(self, db, net, device, epoch, num_adaption_steps):
         params = dict(net.named_parameters())
