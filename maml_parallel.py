@@ -1,4 +1,3 @@
-from support.omniglot_loaders import OmniglotNShot
 from torch.func import vmap, grad, functional_call
 import torch.optim as optim
 import torch.nn.functional as F
@@ -102,7 +101,7 @@ class MAML:
 
             task_num, setsz, c_, h, w = x_spt.size()
 
-            # Fix gpu memory issue
+            # TODO: Fix gpu memory issue
             compute_loss_for_task = functools.partial(self.loss_for_task, net, num_adaption_steps)
             qry_loss, qry_acc = vmap(compute_loss_for_task)(x_spt, y_spt, x_qry, y_qry)
 
