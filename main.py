@@ -1,17 +1,16 @@
-import numpy as np
 import torch
-from torch import nn
-import torch.nn.functional as F
-from torch import autograd
-from torchmeta.datasets import CIFARFS, Omniglot, MiniImagenet
-from torchmeta.transforms import Categorical, ClassSplitter
-from torchmeta.utils.data import BatchMetaDataLoader
 from torchvision.transforms import transforms
 from maml_parallel import MAML
 import torchvision
-from functools import partial
 import torch.optim as optim
+import torch.nn as nn
+from functools import partial
 import wandb
+import copy
+
+import utils
+from models.cnn import CNN
+from models.mlp import MLP
 
 import os
 os.environ["CUDA_VISIBLE_DEVICES"]="5"
@@ -19,57 +18,67 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 run = wandb.init(
 #   mode="disabled",
-  project="meta-kd",
+  project="thesis",
   dir="./",
-  name = 'resnet18-cifar-5-3',
-  tags=["omniglot", "resnet18", "maml", "functional"],
+  name = '3xresnet18-CIFAR-5-5-1',
+#   tags=["omniglot", "resnet18", "maml", "functional"],
 )
 
+wandb.run.log_code(".")
+
 if __name__ == '__main__':
-    test = False
+    iterations = 15000 
     n_way = 5 
     shots = 5
-    batch_size = 24
-    epochs = 200
+    batch_size = 32
     num_adaption_steps = 1
+    num_test_adaption_steps = 1
     seed = 42
+    greyscale = True
+    inner_lr = 0.01 # 0.1 for omniglot, 1e-3 for miniimagenet
+    meta_lr = 0.01
 
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
+    utils.set_seed(seed)
 
     transform = transforms.Compose([
-        transforms.Resize((32,32)),
+        transforms.Resize((28,28)),
         transforms.ToTensor(),
     ])
 
-    # Load data
-    train_dataset = CIFARFS("data/", num_classes_per_task=n_way, meta_train=True, transform=transform, target_transform=Categorical(num_classes=n_way), download=False)
-    val_dataset = CIFARFS("data/", num_classes_per_task=n_way, meta_val=True, transform=transform, target_transform=Categorical(num_classes=n_way), download=False)
-    test_dataset = CIFARFS("data/", num_classes_per_task=n_way, meta_test=True, transform=transform, target_transform=Categorical(num_classes=n_way), download=False)
+    train_loader, val_loader, test_loader = utils.load_data(name="Omniglot",
+                                                            shots=shots,
+                                                            n_ways=n_way,
+                                                            batch_size=batch_size,
+                                                            root='../data',
+                                                            num_workers=4,
+                                                            train_transform=transform,
+                                                            test_transform=transform)
+    
 
-    train_dataset = ClassSplitter(train_dataset, shuffle=True, num_train_per_class=shots, num_test_per_class=shots)
-    val_dataset = ClassSplitter(val_dataset, shuffle=True, num_train_per_class=shots, num_test_per_class=shots)
-    test_dataset = ClassSplitter(test_dataset, shuffle=True, num_train_per_class=shots, num_test_per_class=shots)
-
-    train_loader = BatchMetaDataLoader(train_dataset, batch_size=batch_size, num_workers=4)
-    val_loader = BatchMetaDataLoader(val_dataset, batch_size=batch_size, num_workers=4)
-    test_loader = BatchMetaDataLoader(test_dataset, batch_size=batch_size, num_workers=4)
-
-    net = torchvision.models.resnet18(norm_layer=partial(nn.BatchNorm2d, track_running_stats=False))
-    # net.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False) # Since omniglot is grayscale
-    net.fc = nn.Linear(net.fc.in_features, n_way)
-    net.to(device)
-    net.train()
+    m1= torchvision.models.resnet18(norm_layer=partial(nn.BatchNorm2d, track_running_stats=False))
+    m1.fc = nn.Linear(m1.fc.in_features, n_way)
+    m1.to(device)
 
     maml = MAML()
-    meta_opt = optim.Adam(net.parameters(), lr=1e-3)
 
-    for epoch in range(epochs):
-        maml.train(train_loader, net, device, meta_opt, epoch, num_adaption_steps)
-        maml.test(val_loader, net, device, epoch, num_adaption_steps)
+    m1_meta_opt = optim.Adam(m1.parameters(), lr=1e-3)
 
-    maml.test(test_loader, net, device, epoch, num_adaption_steps)
+    train_loader = iter(train_loader)
 
-    torch.save(net.state_dict(), 'trained/resnet18-omniglot-5-3.pth')
+    for epoch in range(iterations):
+        m1_loss, m1_acc = maml.train(train_loader, m1, device, m1_meta_opt, epoch, num_adaption_steps, inner_lr)
+
+        wandb.log({"m1_train_loss": m1_loss, "m1_train_acc": m1_acc})
+
+        if epoch % 1000 == 0:
+            m1_loss, m1_acc = maml.test(val_loader, m1, device, num_adaption_steps, inner_lr)
+            
+            wandb.log({"m1_val_loss": m1_loss, "m1_val_acc": m1_acc})
+
+    m1_test_loss, m1_test_acc = maml.test(test_loader, m1, device, epoch, num_adaption_steps)
+
+    wandb.log({"m1_test_loss": m1_test_loss, "m1_test_acc": m1_test_acc}) 
+
+    print(f"M1 Test Loss: {m1_test_loss:.4f} | Test Acc: {m1_test_acc:.4f}")
+
+    torch.save(m1.state_dict(), 'trained/m1.pt')
