@@ -13,30 +13,30 @@ from models.cnn import CNN
 from models.mlp import MLP
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"]="5"
+os.environ["CUDA_VISIBLE_DEVICES"]="6"
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 run = wandb.init(
 #   mode="disabled",
   project="thesis",
   dir="./",
-  name = '3xresnet18-CIFAR-5-5-1',
+  name = 'ex1.2',
 #   tags=["omniglot", "resnet18", "maml", "functional"],
 )
 
 wandb.run.log_code(".")
 
 if __name__ == '__main__':
-    iterations = 15000 
+    iterations = 60000
     n_way = 5 
     shots = 5
-    batch_size = 32
-    num_adaption_steps = 1
-    num_test_adaption_steps = 1
+    batch_size = 16
+    num_adaption_steps = 5
+    num_test_adaption_steps = 5
     seed = 42
     greyscale = True
-    inner_lr = 0.01 # 0.1 for omniglot, 1e-3 for miniimagenet
-    meta_lr = 0.01
+    inner_lr = 1e-3 # 0.1 for omniglot, 1e-3 for miniimagenet
+    meta_lr = 1e-3
 
     utils.set_seed(seed)
 
@@ -45,19 +45,22 @@ if __name__ == '__main__':
         transforms.ToTensor(),
     ])
 
-    train_loader, val_loader, test_loader = utils.load_data(name="Omniglot",
+    train_loader, val_loader, test_loader = utils.load_data(name="MiniImagenet",
                                                             shots=shots,
                                                             n_ways=n_way,
                                                             batch_size=batch_size,
-                                                            root='../data',
+                                                            root='data',
                                                             num_workers=4,
                                                             train_transform=transform,
                                                             test_transform=transform)
     
 
-    m1= torchvision.models.resnet18(norm_layer=partial(nn.BatchNorm2d, track_running_stats=False))
+    m1= torchvision.models.resnet50(norm_layer=partial(nn.BatchNorm2d, track_running_stats=False))
     m1.fc = nn.Linear(m1.fc.in_features, n_way)
     m1.to(device)
+
+    # m1 = CNN(in_channels=3, output_size=n_way) 
+    # m1.to(device)
 
     maml = MAML()
 
@@ -81,4 +84,4 @@ if __name__ == '__main__':
 
     print(f"M1 Test Loss: {m1_test_loss:.4f} | Test Acc: {m1_test_acc:.4f}")
 
-    torch.save(m1.state_dict(), 'trained/m1.pt')
+    torch.save(m1.state_dict(), f'trained/{run.name}.pt')
